@@ -35,8 +35,8 @@ const LinkedinIcon = ({ className = "w-4 h-4" }) => (
   </svg>
 );
 
-// Seed Projects Data
-const INITIAL_PROJECTS = [
+// Projects Data
+const PROJECTS = [
   {
     id: 1,
     title: "Automated GST Billing & Management System",
@@ -48,10 +48,7 @@ const INITIAL_PROJECTS = [
     liveUrl: "https://github.com/reddyjishnureddy005-source/billing-system", // You can update this later if you add a video demo link!
     stats: { "Database": "SQLite3", "Invoices": "A4 PDF", "Reporting": "Excel (.xlsx)" },
     accentColor: "from-emerald-500 to-teal-500" // Custom green gradient matching standard finance/accounting app colors
-  }
-];
-
-const EXTRA_PROJECTS = [
+  },
   {
     id: 2,
     title: "HelixVM: 16-Bit Virtual Machine & Custom Compiler",
@@ -79,27 +76,7 @@ const EXTRA_PROJECTS = [
 ];
 
 export default function App() {
-  const [projects, setProjects] = useState(INITIAL_PROJECTS);
-  const [isDemoMode, setIsDemoMode] = useState(true);
-
-  // Helper to toggle project counts for demonstrate conditional showcase
-  const addProject = () => {
-    if (projects.length === 1) {
-      setProjects([INITIAL_PROJECTS[0], EXTRA_PROJECTS[0]]);
-    } else if (projects.length === 2) {
-      setProjects([INITIAL_PROJECTS[0], EXTRA_PROJECTS[0], EXTRA_PROJECTS[1]]);
-    }
-  };
-
-  const removeProject = () => {
-    if (projects.length > 1) {
-      setProjects(projects.slice(0, projects.length - 1));
-    }
-  };
-
-  const resetProjects = () => {
-    setProjects(INITIAL_PROJECTS);
-  };
+  const projects = PROJECTS;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 relative font-sans antialiased overflow-hidden noise-overlay">
@@ -112,53 +89,7 @@ export default function App() {
       {/* Dynamic Grid Overlay */}
       <div className="absolute inset-0 bg-grid-pattern opacity-100 pointer-events-none z-0" />
 
-      {/* Floating Demo Control Center - Showcase for dynamic responsive portfolio layout scaling */}
-      <div className="fixed bottom-6 right-6 z-50 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-xl p-4 shadow-2xl max-w-xs animate-float">
-        <div className="flex items-center gap-2 mb-2">
-          <Settings className="w-4 h-4 text-accent animate-spin-slow" />
-          <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Interactive Architecture Demo</span>
-        </div>
-        <p className="text-[11px] text-slate-400 mb-3 leading-relaxed">
-          Toggle the array length to see the portfolio dynamically reshape its layout in real-time.
-        </p>
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={removeProject}
-              disabled={projects.length <= 1}
-              className="p-1.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              title="Remove Project"
-            >
-              <Minus className="w-3.5 h-3.5" />
-            </button>
-            <span className="text-xs font-mono font-bold px-2 py-0.5 bg-slate-950 rounded border border-slate-800">
-              {projects.length} {projects.length === 1 ? 'project' : 'projects'}
-            </span>
-            <button
-              onClick={addProject}
-              disabled={projects.length >= 3}
-              className="p-1.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              title="Add Project"
-            >
-              <Plus className="w-3.5 h-3.5" />
-            </button>
-          </div>
 
-          {projects.length > 1 && (
-            <button
-              onClick={resetProjects}
-              className="text-[10px] text-accent-light hover:underline flex items-center gap-1 transition-colors"
-            >
-              <RefreshCw className="w-2.5 h-2.5" /> Reset (1)
-            </button>
-          )}
-        </div>
-        <div className="mt-2.5 pt-2 border-t border-slate-800/60 text-center">
-          <span className="text-[10px] text-slate-500">
-            Current Mode: <strong className="text-accent-light">{projects.length === 1 ? '⭐ Featured Layout' : '📱 Grid Layout'}</strong>
-          </span>
-        </div>
-      </div>
 
       {/* Navigation Header */}
       <header className="sticky top-0 z-40 bg-slate-950/80 backdrop-blur-md border-b border-slate-900/80 transition-all duration-300">
@@ -463,12 +394,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Quick interactive callout to emphasize dynamic architecture */}
-          <div className="mt-8 p-4 rounded-xl bg-slate-900/40 border border-slate-850/80 text-center max-w-md mx-auto">
-            <span className="text-xs text-slate-400 leading-relaxed">
-              💡 <strong>Scaling Test:</strong> Try adding more projects from the bottom-right Dev Widget to witness the multi-card grid animation transition!
-            </span>
-          </div>
+
 
         </section>
 
