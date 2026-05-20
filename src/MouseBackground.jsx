@@ -1,353 +1,286 @@
 import { useEffect, useRef } from 'react';
 
-// ─── Fluid / Water Config ───────────────────────────────────────────────────
-const COLS = 80;           // grid columns for velocity field
-const ROWS = 50;           // grid rows  for velocity field
-const RIPPLE_COUNT = 6;    // max concurrent ripple rings
-const BLOB_COUNT = 5;      // floating metaball blobs
-const DAMPING = 0.97;      // ripple energy damping
-const SPREAD = 0.22;       // wave spread speed
+// ─────────────────────────────────────────────────────────────────────────────
+//  HIGH-PERFORMANCE INTERACTIVE WATER FLUID SIMULATION
+//  Algorithm: 2D discrete shallow-water wave equation with 3-buffer swap
+//  Render:    ImageData pixel painting at reduced resolution → upscale via drawImage
+//  Mouse:     Velocity-weighted disturbance injection via pointermove
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Dark-navy + indigo/violet water palette
-const DEEP_COLOR   = [8,   10,  30];   // very deep water
-const MID_COLOR    = [18,  22,  60];   // mid depth
-const SURF_COLOR   = [40,  55, 130];   // surface highlight
-const FOAM_COLOR   = [99, 130, 255];   // bright foam / crest
-const CAUSTIC_HUE  = [120, 160, 255];  // caustic light scatter
+// ── Config ────────────────────────────────────────────────────────────────────
+const SCALE         = 4;      // px per wave cell (4 = good perf / quality balance)
+const DAMPING       = 0.972;  // energy per frame. 0.972^90 ≈ 8% → ~1.5s decay at 60fps
+const MOUSE_RADIUS  = 7;      // disturbance radius in wave cells
+const MOUSE_BASE    = 120;    // base strength when cursor is barely moving
+const MOUSE_VEL_K   = 3.2;    // velocity multiplier: faster cursor → bigger splash
+const MAX_STRENGTH  = 700;    // clamp to prevent grid explosion
+const AMP_CLAMP     = 1200;   // hard clamp on wave amplitude
+const RESIZE_DEBOUNCE = 180;  // ms to wait after resize before rebuilding grid
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-function lerp(a, b, t) { return a + (b - a) * t; }
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+// ── Color palette (deep dark navy/indigo → luminescent blue-teal crests) ─────
+//    All values are [R, G, B] in 0-255 range
+const C_VOID   = [3,    4,  16];  // absolute deep background — near-black indigo
+const C_DEEP   = [5,    9,  32];  // resting water surface
+const C_TROUGH = [7,   14,  52];  // wave troughs — slightly lighter indigo
+const C_MID    = [18,  62, 165];  // mid-amplitude blue
+const C_CREST  = [52, 148, 255];  // bright luminescent blue crest
+const C_FOAM   = [148, 212, 255]; // near-white blue-teal foam tip
+
+// ── Fast integer linear interpolation ────────────────────────────────────────
 function lerpColor(c1, c2, t) {
   return [
-    Math.round(lerp(c1[0], c2[0], t)),
-    Math.round(lerp(c1[1], c2[1], t)),
-    Math.round(lerp(c1[2], c2[2], t)),
+    (c1[0] + (c2[0] - c1[0]) * t) | 0,
+    (c1[1] + (c2[1] - c1[1]) * t) | 0,
+    (c1[2] + (c2[2] - c1[2]) * t) | 0,
   ];
 }
 
-// ─── Component ──────────────────────────────────────────────────────────────
+// ── Map normalized wave height [-1,1] to RGB via multi-stop gradient ─────────
+function heightToColor(hn) {
+  if (hn >= 0) {
+    if (hn < 0.25) return lerpColor(C_DEEP,   C_MID,   hn / 0.25);
+    if (hn < 0.60) return lerpColor(C_MID,    C_CREST, (hn - 0.25) / 0.35);
+                   return lerpColor(C_CREST,  C_FOAM,  Math.min((hn - 0.60) / 0.40, 1));
+  } else {
+    const t = Math.min(-hn, 1);
+    if (t < 0.35) return lerpColor(C_DEEP,   C_TROUGH, t / 0.35);
+                  return C_TROUGH;
+  }
+}
+
+// ── React Component ───────────────────────────────────────────────────────────
 export default function MouseBackground() {
   const canvasRef = useRef(null);
-  const stateRef  = useRef(null);
-  const rafRef    = useRef(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const ctx    = canvas.getContext('2d');
 
-    // ── resize ────────────────────────────────────────────────────────────
-    let W = 0, H = 0;
-    function resize() {
+    // Main ctx — for drawImage scaling
+    const ctx = canvas.getContext('2d');
+
+    // Offscreen canvas — pixel buffer painted at grid resolution, then upscaled
+    const off    = document.createElement('canvas');
+    const offCtx = off.getContext('2d');
+
+    // ── State variables (mutable, no React state) ──────────────────────────
+    let W, H, cols, rows, n;
+    let buf0, buf1, buf2; // triple buffer: cur, prev, scratch
+    let imgData, pix;     // ImageData and its Uint8ClampedArray view
+    let rafId;
+    let resizeTimer = null;
+
+    // Mouse tracking: grid coords + velocity
+    const mouse = {
+      gx: -999, gy: -999,   // current grid pos
+      pgx: -999, pgy: -999, // previous grid pos (for velocity)
+      active: false,
+    };
+
+    // ── Grid initialisation ────────────────────────────────────────────────
+    function buildGrid() {
       W = canvas.width  = window.innerWidth;
       H = canvas.height = window.innerHeight;
-      initGrid();
+
+      // +2 border cells on each axis (edges stay at 0 — absorbing boundary)
+      cols = Math.ceil(W / SCALE) + 2;
+      rows = Math.ceil(H / SCALE) + 2;
+      n    = cols * rows;
+
+      buf0 = new Float32Array(n); // current heights
+      buf1 = new Float32Array(n); // previous heights
+      buf2 = new Float32Array(n); // scratch / next heights
+
+      // Offscreen pixel buffer (1px per wave cell, upscaled later)
+      off.width  = cols;
+      off.height = rows;
+      imgData    = offCtx.createImageData(cols, rows);
+      pix        = imgData.data;
+
+      // Pre-fill alpha channel to fully opaque (avoids per-pixel write)
+      for (let i = 3; i < pix.length; i += 4) pix[i] = 255;
     }
 
-    // ── wave grid (simple 2-buffer shallow water) ──────────────────────────
-    let cur, prv;
-    function initGrid() {
-      const n = COLS * ROWS;
-      cur = new Float32Array(n);
-      prv = new Float32Array(n);
+    // ── Debounced resize handler ───────────────────────────────────────────
+    function onResize() {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        // Rebuild everything cleanly — old buffers are GC'd automatically
+        buildGrid();
+      }, RESIZE_DEBOUNCE);
     }
 
-    function idx(c, r) {
-      c = ((c % COLS) + COLS) % COLS;
-      r = clamp(r, 0, ROWS - 1);
-      return r * COLS + c;
-    }
+    // ── Inline cell index (no bounds check overhead on hot path) ──────────
+    // Call only with c in [1, cols-2] and r in [1, rows-2]
+    function at(c, r) { return r * cols + c; }
 
-    function disturb(xn, yn, strength) {
-      // xn, yn in [0,1]
-      const c = Math.round(xn * (COLS - 1));
-      const r = Math.round(yn * (ROWS - 1));
-      for (let dr = -2; dr <= 2; dr++) {
-        for (let dc = -2; dc <= 2; dc++) {
-          const dist = Math.sqrt(dr * dr + dc * dc);
-          if (dist <= 2) {
-            cur[idx(c + dc, r + dr)] += strength * (1 - dist / 2.5);
-          }
+    // ── Inject disturbance at grid position (gcx, gcy) ────────────────────
+    function disturb(gcx, gcy, strength, radius) {
+      const ci = (gcx + 0.5) | 0; // +1 accounts for border offset since cols has +2
+      const ri = (gcy + 0.5) | 0;
+      const rad2 = radius * radius;
+
+      for (let dr = -radius; dr <= radius; dr++) {
+        const rr = ri + dr;
+        if (rr < 1 || rr >= rows - 1) continue;
+        const dr2 = dr * dr;
+
+        for (let dc = -radius; dc <= radius; dc++) {
+          const cc = ci + dc;
+          if (cc < 1 || cc >= cols - 1) continue;
+          const d2 = dc * dc + dr2;
+          if (d2 > rad2) continue;
+
+          // Gaussian-like falloff from centre of disturbance
+          const falloff = 1 - Math.sqrt(d2) / radius;
+          buf0[at(cc, rr)] += strength * falloff;
         }
       }
     }
 
+    // ── Wave propagation step (shallow-water discrete equation) ───────────
+    // Formula: next = (left + right + up + down) * 0.5 - prev  → then damp
+    // This produces transverse wave propagation at c=0.5 (stability guaranteed)
     function stepWave() {
-      const next = new Float32Array(COLS * ROWS);
-      for (let r = 1; r < ROWS - 1; r++) {
-        for (let c = 1; c < COLS - 1; c++) {
-          const i = idx(c, r);
-          next[i] =
-            SPREAD * (
-              cur[idx(c - 1, r)] + cur[idx(c + 1, r)] +
-              cur[idx(c, r - 1)] + cur[idx(c, r + 1)] -
-              4 * cur[i]
-            ) * 2
-            + 2 * cur[i] - prv[i];
-          next[i] *= DAMPING;
+      for (let r = 1; r < rows - 1; r++) {
+        const rOff  = r * cols;
+        const rMOff = (r - 1) * cols;
+        const rPOff = (r + 1) * cols;
+
+        for (let c = 1; c < cols - 1; c++) {
+          const i = rOff + c;
+          let v = (
+            buf0[rOff  + c - 1] +   // left
+            buf0[rOff  + c + 1] +   // right
+            buf0[rMOff + c    ] +   // up
+            buf0[rPOff + c    ]     // down
+          ) * 0.5 - buf1[i];
+
+          // Damp to naturally fade ripples (1-2 second decay)
+          v *= DAMPING;
+
+          // Hard clamp prevents floating-point runaway from rapid mouse movement
+          if (v >  AMP_CLAMP) v =  AMP_CLAMP;
+          if (v < -AMP_CLAMP) v = -AMP_CLAMP;
+
+          buf2[i] = v;
         }
       }
-      prv = cur;
-      cur = next;
+
+      // Rotate buffers: buf1 ← buf0, buf0 ← buf2, buf2 free for next frame
+      const tmp = buf1;
+      buf1 = buf0;
+      buf0 = buf2;
+      buf2 = tmp;
     }
 
-    // ── metaball blobs (slowly drift across the canvas) ───────────────────
-    const blobs = Array.from({ length: BLOB_COUNT }, (_, i) => ({
-      x: Math.random(),
-      y: Math.random(),
-      vx: (Math.random() - 0.5) * 0.0006,
-      vy: (Math.random() - 0.5) * 0.0006,
-      r: 0.08 + Math.random() * 0.12,
-      phase: (i / BLOB_COUNT) * Math.PI * 2,
-      speed: 0.003 + Math.random() * 0.004,
-    }));
+    // ── Render wave grid → ImageData → upscale to canvas ──────────────────
+    function renderFrame() {
+      const normaliser = 1 / 480; // tuned so MAX_AMP ≈ 1.0 visible brightness
 
-    function updateBlobs(t) {
-      for (const b of blobs) {
-        b.x += b.vx + Math.cos(t * b.speed + b.phase) * 0.0003;
-        b.y += b.vy + Math.sin(t * b.speed + b.phase + 1) * 0.0003;
-        // wrap
-        if (b.x < -0.1) b.x = 1.1;
-        if (b.x >  1.1) b.x = -0.1;
-        if (b.y < -0.1) b.y = 1.1;
-        if (b.y >  1.1) b.y = -0.1;
+      for (let r = 0; r < rows; r++) {
+        const rOff = r * cols;
+        for (let c = 0; c < cols; c++) {
+          const h  = buf0[rOff + c];
+
+          // ── Normal-map specular highlight ──────────────────────────────
+          // Approximate surface gradient for a rim-light sheen on crests
+          let specular = 0;
+          if (c > 0 && c < cols - 1 && r > 0 && r < rows - 1) {
+            const dx = buf0[rOff + c + 1] - buf0[rOff + c - 1];
+            const dy = buf0[(r + 1) * cols + c] - buf0[(r - 1) * cols + c];
+            // Light direction: top-left (lx=0.4, ly=0.4, lz=0.82) normalised
+            // dot(surface_normal, light) — surface normal = normalize(-dx, -dy, 50)
+            const len = Math.sqrt(dx * dx + dy * dy + 2500);
+            specular = Math.max(0, (-dx * 0.4 - dy * 0.4 + 50 * 0.82) / len);
+            specular = specular * specular * specular; // sharpen specular lobe
+          }
+
+          // Normalise height to [-1, 1]
+          const hn = Math.max(-1, Math.min(1, h * normaliser));
+
+          const col = heightToColor(hn);
+
+          // Add specular highlight (white-blue additive) on crests
+          const specMag = specular * Math.max(0, hn) * 180;
+
+          const pi      = (rOff + c) * 4;
+          pix[pi    ]   = Math.min(255, col[0] + specMag * 0.6) | 0;
+          pix[pi + 1]   = Math.min(255, col[1] + specMag * 0.8) | 0;
+          pix[pi + 2]   = Math.min(255, col[2] + specMag * 1.0) | 0;
+          // alpha already 255
+        }
       }
+
+      // Flush ImageData to offscreen canvas
+      offCtx.putImageData(imgData, 0, 0);
+
+      // Upscale: draw offscreen (small) onto main canvas (full viewport)
+      // imageSmoothingEnabled=true gives bilinear interpolation — smooth wave edges
+      ctx.imageSmoothingEnabled    = true;
+      ctx.imageSmoothingQuality    = 'medium';
+
+      // We draw from (-SCALE, -SCALE) to account for the 1-cell border padding
+      ctx.drawImage(
+        off,
+        0, 0, cols, rows,           // source: full offscreen
+        -SCALE, -SCALE,             // dest origin: hide the border row/col
+        cols * SCALE, rows * SCALE  // dest size: fills viewport + bleed
+      );
     }
 
-    // Compute metaball field value at (xn, yn) in [0,1]
-    function metafield(xn, yn) {
-      let v = 0;
-      for (const b of blobs) {
-        const dx = (xn - b.x) * (W / H); // aspect correct
-        const dy = yn - b.y;
-        const d2 = dx * dx + dy * dy;
-        v += (b.r * b.r) / Math.max(d2, 0.0001);
-      }
-      return v;
-    }
-
-    // ── ripple rings spawned by mouse clicks / movement ───────────────────
-    const ripples = [];
-    function addRipple(xn, yn) {
-      if (ripples.length >= RIPPLE_COUNT) ripples.shift();
-      ripples.push({ x: xn, y: yn, age: 0, life: 80 + Math.random() * 40 });
-    }
-
-    // ── mouse / touch ──────────────────────────────────────────────────────
-    const mouse = { x: -9999, y: -9999, xn: -1, yn: -1, moved: false };
-    let lastDisturbTime = 0;
-
-    function onMouseMove(e) {
-      mouse.x = e.clientX;
-      mouse.y = e.clientY;
-      mouse.xn = mouse.x / W;
-      mouse.yn = mouse.y / H;
-      mouse.moved = true;
-    }
-
-    function onClick(e) {
-      const xn = e.clientX / W;
-      const yn = e.clientY / H;
-      disturb(xn, yn, 12);
-      addRipple(xn, yn);
-    }
-
-    window.addEventListener('mousemove', onMouseMove, { passive: true });
-    window.addEventListener('click',     onClick,     { passive: true });
-    window.addEventListener('resize',    resize);
-
-    // ── smoothed spotlight position ────────────────────────────────────────
-    const spot = { x: 0.5, y: 0.5 };
-
-    // ── ImageData pixel painting ───────────────────────────────────────────
-    function sampleWave(xn, yn) {
-      const c = Math.floor(xn * (COLS - 1));
-      const r = Math.floor(yn * (ROWS - 1));
-      return cur[idx(clamp(c, 0, COLS - 1), clamp(r, 0, ROWS - 1))];
-    }
-
-    // ── draw frame ────────────────────────────────────────────────────────
-    let frame = 0;
-
-    function draw() {
-      frame++;
-      const t = frame * 0.016;
-
-      // ── wave step ───────────────────────────────────────────────────────
+    // ── Main animation loop ────────────────────────────────────────────────
+    function loop() {
       stepWave();
 
-      // disturb wave from mouse movement (throttled)
-      if (mouse.moved && frame - lastDisturbTime > 4) {
-        disturb(mouse.xn, mouse.yn, 3.5 + Math.sin(t * 3) * 1.5);
-        if (Math.random() < 0.15) addRipple(mouse.xn, mouse.yn);
-        lastDisturbTime = frame;
-        mouse.moved = false;
+      // Inject mouse disturbance every frame while active
+      if (mouse.active) {
+        // Velocity magnitude in grid-cell units per frame
+        const vx  = mouse.gx - mouse.pgx;
+        const vy  = mouse.gy - mouse.pgy;
+        const spd = Math.sqrt(vx * vx + vy * vy);
+        const str = Math.min(MOUSE_BASE + spd * MOUSE_VEL_K, MAX_STRENGTH);
+
+        disturb(mouse.gx, mouse.gy, str, MOUSE_RADIUS);
       }
 
-      // smooth spotlight
-      if (mouse.x > -100) {
-        spot.x += (mouse.xn - spot.x) * 0.07;
-        spot.y += (mouse.yn - spot.y) * 0.07;
-      }
-
-      // ── update blobs ────────────────────────────────────────────────────
-      updateBlobs(t);
-
-      // ── pixel-paint water surface ────────────────────────────────────────
-      // Use a smaller offscreen resolution for speed
-      const SCALE = 4;
-      const pw = Math.ceil(W / SCALE);
-      const ph = Math.ceil(H / SCALE);
-      const imgData = ctx.createImageData(pw, ph);
-      const pix = imgData.data;
-
-      for (let py = 0; py < ph; py++) {
-        for (let px = 0; px < pw; px++) {
-          const xn = px / pw;
-          const yn = py / ph;
-
-          // wave height at this pixel
-          const wh = sampleWave(xn, yn);
-
-          // metaball depth  [0 .. ~2+]
-          const meta = clamp(metafield(xn, yn), 0, 3);
-          const metaN = meta / 3;
-
-          // distance from spot for proximity glow
-          const sdx = xn - spot.x;
-          const sdy = yn - spot.y;
-          const spotDist = Math.sqrt(sdx * sdx + sdy * sdy * 1.5);
-          const spotGlow = Math.max(0, 1 - spotDist / 0.45);
-
-          // wave brightness
-          const waveBright = clamp(wh * 0.18, -0.3, 0.8);
-
-          // combine depth layers
-          let col;
-          if (metaN < 0.25) {
-            col = lerpColor(DEEP_COLOR, MID_COLOR, metaN / 0.25);
-          } else if (metaN < 0.6) {
-            col = lerpColor(MID_COLOR, SURF_COLOR, (metaN - 0.25) / 0.35);
-          } else {
-            col = lerpColor(SURF_COLOR, FOAM_COLOR, (metaN - 0.6) / 0.4);
-          }
-
-          // add wave crests
-          if (waveBright > 0.1) {
-            col = lerpColor(col, FOAM_COLOR, clamp(waveBright * 1.8, 0, 1));
-          } else if (waveBright < -0.05) {
-            col = lerpColor(col, DEEP_COLOR, clamp(-waveBright * 1.2, 0, 1));
-          }
-
-          // caustic scatter near mouse + wave peaks
-          const causticStrength = spotGlow * 0.55 + clamp(waveBright * 0.6, 0, 0.4);
-          col = lerpColor(col, CAUSTIC_HUE, clamp(causticStrength, 0, 1));
-
-          // shimmer from sine waves
-          const shimmer = (Math.sin(xn * 18 + t * 1.4) * Math.cos(yn * 14 - t * 1.1) + 1) * 0.5;
-          const shimmerMask = clamp(spotGlow * 0.35 + waveBright * 0.3, 0, 0.4);
-          col[0] = clamp(col[0] + shimmer * shimmerMask * 60, 0, 255);
-          col[1] = clamp(col[1] + shimmer * shimmerMask * 80, 0, 255);
-          col[2] = clamp(col[2] + shimmer * shimmerMask * 120, 0, 255);
-
-          const pi = (py * pw + px) * 4;
-          pix[pi]     = col[0];
-          pix[pi + 1] = col[1];
-          pix[pi + 2] = col[2];
-          pix[pi + 3] = 255;
-        }
-      }
-
-      // put pixel data then scale up via canvas transform
-      const offscreen = document.createElement('canvas');
-      offscreen.width  = pw;
-      offscreen.height = ph;
-      offscreen.getContext('2d').putImageData(imgData, 0, 0);
-
-      ctx.clearRect(0, 0, W, H);
-      ctx.drawImage(offscreen, 0, 0, W, H);
-
-      // ── draw ripple rings ───────────────────────────────────────────────
-      for (let i = ripples.length - 1; i >= 0; i--) {
-        const rp = ripples[i];
-        rp.age++;
-        if (rp.age >= rp.life) { ripples.splice(i, 1); continue; }
-
-        const progress = rp.age / rp.life;
-        const radius   = progress * Math.min(W, H) * 0.28;
-        const alpha    = (1 - progress) * 0.55;
-        const width    = (1 - progress) * 2.5 + 0.5;
-
-        // outer ring
-        const grad = ctx.createRadialGradient(
-          rp.x * W, rp.y * H, radius * 0.85,
-          rp.x * W, rp.y * H, radius
-        );
-        grad.addColorStop(0, `rgba(100,140,255,0)`);
-        grad.addColorStop(0.6, `rgba(140,180,255,${alpha * 0.7})`);
-        grad.addColorStop(1, `rgba(180,210,255,${alpha})`);
-
-        ctx.beginPath();
-        ctx.arc(rp.x * W, rp.y * H, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = grad;
-        ctx.lineWidth   = width;
-        ctx.stroke();
-
-        // secondary inner ring (trailing)
-        if (progress > 0.12) {
-          const r2 = radius * 0.6;
-          const a2 = (1 - progress) * 0.3;
-          ctx.beginPath();
-          ctx.arc(rp.x * W, rp.y * H, r2, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(120,160,255,${a2})`;
-          ctx.lineWidth   = width * 0.5;
-          ctx.stroke();
-        }
-      }
-
-      // ── mouse proximity glow lens ───────────────────────────────────────
-      if (mouse.x > -100) {
-        const gx = mouse.x;
-        const gy = mouse.y;
-        const gr = ctx.createRadialGradient(gx, gy, 0, gx, gy, 220);
-        gr.addColorStop(0,   'rgba(80,120,255,0.12)');
-        gr.addColorStop(0.35,'rgba(60, 90,220,0.07)');
-        gr.addColorStop(1,   'rgba(0,0,0,0)');
-        ctx.fillStyle = gr;
-        ctx.beginPath();
-        ctx.arc(gx, gy, 220, 0, Math.PI * 2);
-        ctx.fill();
-
-        // bright specular highlight dot
-        const sg = ctx.createRadialGradient(gx, gy, 0, gx, gy, 28);
-        sg.addColorStop(0,   'rgba(200,220,255,0.28)');
-        sg.addColorStop(0.5, 'rgba(140,180,255,0.1)');
-        sg.addColorStop(1,   'rgba(0,0,0,0)');
-        ctx.fillStyle = sg;
-        ctx.beginPath();
-        ctx.arc(gx, gy, 28, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      rafRef.current = requestAnimationFrame(draw);
+      renderFrame();
+      rafId = requestAnimationFrame(loop);
     }
 
-    // ── boot ──────────────────────────────────────────────────────────────
-    resize();
-    // seed a few initial disturbances so it doesn't look static on load
-    for (let i = 0; i < 8; i++) {
-      setTimeout(() => {
-        disturb(Math.random(), Math.random(), 8);
-        addRipple(Math.random(), Math.random());
-      }, i * 300);
-    }
-    draw();
+    // ── Pointer events ─────────────────────────────────────────────────────
+    function onPointerMove(e) {
+      // Convert viewport pixel to wave-grid coordinates
+      // +1.5 offsets for the border cell padding
+      const gx = e.clientX / SCALE + 1.5;
+      const gy = e.clientY / SCALE + 1.5;
 
+      mouse.pgx    = mouse.gx;
+      mouse.pgy    = mouse.gy;
+      mouse.gx     = gx;
+      mouse.gy     = gy;
+      mouse.active = true;
+    }
+
+    function onPointerLeave() {
+      mouse.active = false;
+      mouse.gx = mouse.gy = mouse.pgx = mouse.pgy = -999;
+    }
+
+    // ── Boot ──────────────────────────────────────────────────────────────
+    buildGrid();
+    loop();
+
+    window.addEventListener('pointermove',  onPointerMove,  { passive: true });
+    window.addEventListener('pointerleave', onPointerLeave, { passive: true });
+    window.addEventListener('resize',       onResize,       { passive: true });
+
+    // ── Cleanup on unmount ─────────────────────────────────────────────────
     return () => {
-      cancelAnimationFrame(rafRef.current);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('click',     onClick);
-      window.removeEventListener('resize',    resize);
+      cancelAnimationFrame(rafId);
+      clearTimeout(resizeTimer);
+      window.removeEventListener('pointermove',  onPointerMove);
+      window.removeEventListener('pointerleave', onPointerLeave);
+      window.removeEventListener('resize',       onResize);
     };
   }, []);
 
@@ -360,9 +293,9 @@ export default function MouseBackground() {
         left:          0,
         width:         '100vw',
         height:        '100vh',
-        pointerEvents: 'none',
-        zIndex:        0,
-        opacity:       1,
+        zIndex:        -1,
+        pointerEvents: 'auto',
+        display:       'block',
       }}
       aria-hidden="true"
     />

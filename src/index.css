@@ -18,7 +18,8 @@
   }
 
   body {
-    background-color: #020617;
+    /* Background is owned by the canvas simulation at z-index:-1 */
+    background-color: transparent;
     color: #f1f5f9;
     font-family: 'Inter', system-ui, sans-serif;
     overflow-x: hidden;

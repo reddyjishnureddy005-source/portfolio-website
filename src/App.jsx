@@ -80,7 +80,7 @@ export default function App() {
   const projects = PROJECTS;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 relative font-sans antialiased overflow-hidden noise-overlay">
+    <div className="min-h-screen text-slate-100 relative font-sans antialiased overflow-hidden noise-overlay">
 
       {/* Mouse-reactive canvas background */}
       <MouseBackground />
