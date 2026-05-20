@@ -80,10 +80,11 @@ export default function App() {
   const projects = PROJECTS;
 
   return (
-    <div className="min-h-screen text-slate-100 relative font-sans antialiased overflow-hidden noise-overlay">
-
-      {/* Mouse-reactive canvas background */}
+    <>
+      {/* Water canvas — fixed behind everything, outside overflow:hidden div */}
       <MouseBackground />
+
+      <div className="min-h-screen text-slate-100 relative font-sans antialiased overflow-x-hidden noise-overlay">
 
       {/* Background Decorative Lighting */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-[600px] bg-radial-accent pointer-events-none z-[2]" />
@@ -544,5 +545,6 @@ export default function App() {
       </main>
 
     </div>
+    </>
   );
 }
