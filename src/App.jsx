@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import MouseBackground from './MouseBackground';
 import {
   ExternalLink,
   Terminal,
@@ -81,13 +82,16 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 relative font-sans antialiased overflow-hidden noise-overlay">
 
+      {/* Mouse-reactive canvas background */}
+      <MouseBackground />
+
       {/* Background Decorative Lighting */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-[600px] bg-radial-accent pointer-events-none z-0" />
-      <div className="absolute top-[20%] left-[-10%] w-[400px] h-[400px] bg-indigo-500/5 rounded-full blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-[20%] right-[-10%] w-[400px] h-[400px] bg-purple-500/5 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-[600px] bg-radial-accent pointer-events-none z-[2]" />
+      <div className="absolute top-[20%] left-[-10%] w-[400px] h-[400px] bg-indigo-500/5 rounded-full blur-[120px] pointer-events-none z-[2]" />
+      <div className="absolute bottom-[20%] right-[-10%] w-[400px] h-[400px] bg-purple-500/5 rounded-full blur-[120px] pointer-events-none z-[2]" />
 
       {/* Dynamic Grid Overlay */}
-      <div className="absolute inset-0 bg-grid-pattern opacity-100 pointer-events-none z-0" />
+      <div className="absolute inset-0 bg-grid-pattern opacity-100 pointer-events-none z-[2]" />
 
 
 
