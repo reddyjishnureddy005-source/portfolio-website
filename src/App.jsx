@@ -426,7 +426,7 @@ export default function App() {
                   {["Discrete Mathematics", "Data Structures", "Computer Architecture", "Algorithms Design", "Compilers", "Automata Theory", "P2P Computing", "Software Engineering"].map((skill, idx) => (
                     <span
                       key={idx}
-                      className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs font-medium text-slate-300 hover:border-accent/40 transition-colors"
+                      className="skill-tag px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs font-medium text-slate-300 hover:border-accent/40"
                     >
                       {skill}
                     </span>
@@ -514,19 +514,19 @@ export default function App() {
                 href="https://github.com"
                 target="_blank"
                 rel="noreferrer"
-                className="p-3.5 rounded-full bg-slate-900 border border-slate-850 text-slate-400 hover:text-white hover:border-accent hover:shadow-accent-sm transition-all"
+                className="btn-icon"
                 aria-label="GitHub"
               >
-                <GithubIcon className="w-5.5 h-5.5" />
+                <GithubIcon className="w-5 h-5" />
               </a>
               <a
                 href="https://linkedin.com"
                 target="_blank"
                 rel="noreferrer"
-                className="p-3.5 rounded-full bg-slate-900 border border-slate-850 text-slate-400 hover:text-white hover:border-accent hover:shadow-accent-sm transition-all"
+                className="btn-icon"
                 aria-label="LinkedIn"
               >
-                <LinkedinIcon className="w-5.5 h-5.5" />
+                <LinkedinIcon className="w-5 h-5" />
               </a>
             </div>
 
